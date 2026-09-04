@@ -1,0 +1,15 @@
+services:
+  apple-map-proxy:
+    image: ghcr.io/anson10124/apple_map_proxy:latest
+    container_name: apple-map-proxy
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8080
+      # Optional customizations:
+      # - SECRET_PREFIX=4cjLaD4jGRwlQ9U72xIzEBe0vHBmf9
+      # - SATELLITE_VERSION=10421
+      # - OVERLAY_VERSION=2609034
+      # - ROAD_VERSION=2609034

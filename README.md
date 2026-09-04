@@ -32,6 +32,27 @@ cargo build --release
 ./target/release/apple-map-proxy.exe --port 8080
 ```
 
+### Docker
+
+#### Using Docker Compose (Recommended for Homelab)
+```bash
+docker compose up -d
+```
+
+#### Using Docker CLI
+```bash
+# Run pre-built image from GitHub Container Registry
+docker run -d \
+  --name apple-map-proxy \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  ghcr.io/anson10124/apple_map_proxy:latest
+
+# Or build and run locally
+docker build -t apple-map-proxy .
+docker run -d --name apple-map-proxy -p 8080:8080 apple-map-proxy
+```
+
 ---
 
 ## Command-Line Arguments & Environment Variables

@@ -1,0 +1,8 @@
+target/
+.git/
+.github/
+.gitignore
+*.md
+test.py
+docker-compose*.yml
+Dockerfile*
