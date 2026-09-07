@@ -5,6 +5,7 @@ use axum::{
     http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
+use bytes::Bytes;
 use serde::{Deserialize, Deserializer};
 use url::form_urlencoded;
 
@@ -93,7 +94,7 @@ pub fn clean_coord(y: &str) -> &str {
     y.split('.').next().unwrap_or(y)
 }
 
-fn build_response(status: StatusCode, media_type: &str, body: Vec<u8>) -> Response {
+fn build_response(status: StatusCode, media_type: &str, body: Bytes) -> Response {
     let mut resp = (status, body).into_response();
     let headers = resp.headers_mut();
     headers.insert(
@@ -131,6 +132,65 @@ async fn fetch_upstream(
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Upstream request failed: {e}")))
 }
 
+async fn fetch_upstream_tile(
+    state: &AppState,
+    raw_url: &str,
+    default_media_type: &str,
+    referer: Option<&str>,
+) -> Result<(String, Bytes), (StatusCode, String)> {
+    let resp = fetch_upstream(state, raw_url, referer).await?;
+    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+
+    if !status.is_success() {
+        return Err((status, format!("Upstream request failed with status: {status}")));
+    }
+
+    let media_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(default_media_type)
+        .to_string();
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    Ok((media_type, bytes))
+}
+
+async fn fetch_tile_or_cache(
+    state: &AppState,
+    cache_key: &str,
+    raw_url: &str,
+    default_media_type: &str,
+    referer: Option<&str>,
+) -> Result<(String, Bytes), (StatusCode, String)> {
+    if let Some(cache) = &state.cache {
+        let key = cache_key.to_string();
+        let raw_url = raw_url.to_string();
+        let default_media_type = default_media_type.to_string();
+        let referer = referer.map(|s| s.to_string());
+        let state_clone = state.clone();
+
+        cache
+            .try_get_with(key, async move {
+                fetch_upstream_tile(
+                    &state_clone,
+                    &raw_url,
+                    &default_media_type,
+                    referer.as_deref(),
+                )
+                .await
+            })
+            .await
+            .map_err(|e| (*e).clone())
+    } else {
+        fetch_upstream_tile(state, raw_url, default_media_type, referer).await
+    }
+}
+
 pub async fn get_road(
     State(state): State<Arc<AppState>>,
     Path((z, x, y)): Path<(u32, u32, String)>,
@@ -154,19 +214,8 @@ pub async fn get_road(
         params.emphasis
     );
 
-    let resp = fetch_upstream(&state, &raw_url, Some(REFERER_HEADER)).await?;
-    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-
-    if !status.is_success() {
-        return Err((status, "Failed to fetch road tile".to_string()));
-    }
-
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-
-    Ok(build_response(StatusCode::OK, "image/png", bytes.to_vec()))
+    let (media_type, bytes) = fetch_tile_or_cache(&state, &raw_url, &raw_url, "image/png", Some(REFERER_HEADER)).await?;
+    Ok(build_response(StatusCode::OK, &media_type, bytes))
 }
 
 pub async fn get_road_dark(
@@ -191,19 +240,8 @@ pub async fn get_road_dark(
         params.emphasis
     );
 
-    let resp = fetch_upstream(&state, &raw_url, Some(REFERER_HEADER)).await?;
-    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-
-    if !status.is_success() {
-        return Err((status, "Failed to fetch dark road tile".to_string()));
-    }
-
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-
-    Ok(build_response(StatusCode::OK, "image/png", bytes.to_vec()))
+    let (media_type, bytes) = fetch_tile_or_cache(&state, &raw_url, &raw_url, "image/png", Some(REFERER_HEADER)).await?;
+    Ok(build_response(StatusCode::OK, &media_type, bytes))
 }
 
 pub async fn get_satellite(
@@ -216,19 +254,8 @@ pub async fn get_satellite(
         z, x, clean_y, state.satellite_version
     );
 
-    let resp = fetch_upstream(&state, &raw_url, None).await?;
-    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-
-    if !status.is_success() {
-        return Err((status, "Failed to fetch satellite tile".to_string()));
-    }
-
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-
-    Ok(build_response(StatusCode::OK, "image/jpeg", bytes.to_vec()))
+    let (media_type, bytes) = fetch_tile_or_cache(&state, &raw_url, &raw_url, "image/jpeg", None).await?;
+    Ok(build_response(StatusCode::OK, &media_type, bytes))
 }
 
 pub async fn get_overlay(
@@ -241,26 +268,16 @@ pub async fn get_overlay(
         x, clean_y, z, state.overlay_version
     );
 
-    let resp = fetch_upstream(&state, &raw_url, Some(REFERER_HEADER)).await?;
-    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-
-    if !status.is_success() {
-        return Err((status, "Failed to fetch overlay tile".to_string()));
-    }
-
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-
-    Ok(build_response(StatusCode::OK, "image/png", bytes.to_vec()))
+    let (media_type, bytes) = fetch_tile_or_cache(&state, &raw_url, &raw_url, "image/png", Some(REFERER_HEADER)).await?;
+    Ok(build_response(StatusCode::OK, &media_type, bytes))
 }
 
-pub async fn get_hybrid(
-    State(state): State<Arc<AppState>>,
-    Path((z, x, y)): Path<(u32, u32, String)>,
-) -> Result<Response, (StatusCode, String)> {
-    let clean_y = clean_coord(&y);
+async fn composite_hybrid_fetch(
+    state: &AppState,
+    z: u32,
+    x: u32,
+    clean_y: &str,
+) -> Result<(String, Bytes), (StatusCode, String)> {
     let sat_url = format!(
         "https://sat-cdn.apple-mapkit.com/tile?style=7&size=2&scale=2&z={}&x={}&y={}&v={}",
         z, x, clean_y, state.satellite_version
@@ -271,42 +288,53 @@ pub async fn get_hybrid(
     );
 
     let (resp_sat, resp_overlay) = tokio::join!(
-        fetch_upstream(&state, &sat_url, None),
-        fetch_upstream(&state, &overlay_url, Some(REFERER_HEADER))
+        fetch_tile_or_cache(state, &sat_url, &sat_url, "image/jpeg", None),
+        fetch_tile_or_cache(state, &overlay_url, &overlay_url, "image/png", Some(REFERER_HEADER))
     );
 
-    let resp_sat = resp_sat?;
-    let sat_status = StatusCode::from_u16(resp_sat.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let (_, sat_bytes) = resp_sat?;
 
-    if !sat_status.is_success() {
-        return Err((sat_status, "Failed to fetch satellite tile".to_string()));
-    }
+    if let Ok((_, overlay_bytes)) = resp_overlay {
+        let sat_clone = sat_bytes.clone();
+        let composite_result = tokio::task::spawn_blocking(move || {
+            composite_hybrid_tile(&sat_clone, &overlay_bytes)
+        })
+        .await;
 
-    let sat_bytes = resp_sat
-        .bytes()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
-        .to_vec();
-
-    if let Ok(resp_ov) = resp_overlay {
-        if resp_ov.status().is_success() {
-            if let Ok(overlay_bytes) = resp_ov.bytes().await {
-                let sat_clone = sat_bytes.clone();
-                let overlay_vec = overlay_bytes.to_vec();
-
-                let composite_result = tokio::task::spawn_blocking(move || {
-                    composite_hybrid_tile(&sat_clone, &overlay_vec)
-                })
-                .await;
-
-                if let Ok(Ok(composited_bytes)) = composite_result {
-                    return Ok(build_response(StatusCode::OK, "image/jpeg", composited_bytes));
-                }
-            }
+        if let Ok(Ok(composited_bytes)) = composite_result {
+            return Ok(("image/jpeg".to_string(), composited_bytes));
         }
     }
-    
-    Ok(build_response(StatusCode::OK, "image/jpeg", sat_bytes))
+
+    Ok(("image/jpeg".to_string(), sat_bytes))
+}
+
+pub async fn get_hybrid(
+    State(state): State<Arc<AppState>>,
+    Path((z, x, y)): Path<(u32, u32, String)>,
+) -> Result<Response, (StatusCode, String)> {
+    let clean_y = clean_coord(&y);
+    let cache_key = format!(
+        "hybrid:{}:{}:{}:v_sat={}:v_ov={}",
+        z, x, clean_y, state.satellite_version, state.overlay_version
+    );
+
+    let (media_type, bytes) = if let Some(cache) = &state.cache {
+        let key = cache_key;
+        let state_clone = state.clone();
+        let clean_y_str = clean_y.to_string();
+
+        cache
+            .try_get_with(key, async move {
+                composite_hybrid_fetch(&state_clone, z, x, &clean_y_str).await
+            })
+            .await
+            .map_err(|e| (*e).clone())?
+    } else {
+        composite_hybrid_fetch(&state, z, x, clean_y).await?
+    };
+
+    Ok(build_response(StatusCode::OK, &media_type, bytes))
 }
 
 pub async fn get_icon(
@@ -322,26 +350,8 @@ pub async fn get_icon(
         .finish();
 
     let raw_url = format!("https://cdn.apple-mapkit.com/md/v1/icon?{query_string}");
-    let resp = fetch_upstream(&state, &raw_url, Some(REFERER_HEADER)).await?;
-    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-
-    if !status.is_success() {
-        return Err((status, "Failed to fetch icon".to_string()));
-    }
-
-    let content_type = resp
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("image/png")
-        .to_string();
-
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-
-    Ok(build_response(StatusCode::OK, &content_type, bytes.to_vec()))
+    let (media_type, bytes) = fetch_tile_or_cache(&state, &raw_url, &raw_url, "image/png", Some(REFERER_HEADER)).await?;
+    Ok(build_response(StatusCode::OK, &media_type, bytes))
 }
 
 pub async fn get_shield(
@@ -357,24 +367,6 @@ pub async fn get_shield(
         .finish();
 
     let raw_url = format!("https://cdn.apple-mapkit.com/md/v1/shield?{query_string}");
-    let resp = fetch_upstream(&state, &raw_url, Some(REFERER_HEADER)).await?;
-    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-
-    if !status.is_success() {
-        return Err((status, "Failed to fetch shield".to_string()));
-    }
-
-    let content_type = resp
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("image/png")
-        .to_string();
-
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-
-    Ok(build_response(StatusCode::OK, &content_type, bytes.to_vec()))
+    let (media_type, bytes) = fetch_tile_or_cache(&state, &raw_url, &raw_url, "image/png", Some(REFERER_HEADER)).await?;
+    Ok(build_response(StatusCode::OK, &media_type, bytes))
 }

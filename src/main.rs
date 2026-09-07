@@ -68,6 +68,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Overlay tiles:   http://{}/overlay/{{z}}/{{x}}/{{y}}", bind_addr);
     println!("  Icons:           http://{}/md/v1/icon?... ", bind_addr);
     println!("  Shields:         http://{}/md/v1/shield?... ", bind_addr);
+    if args.cache_size_mb > 0 {
+        println!("  Cache:           Enabled ({} MB, TTL {}s)", args.cache_size_mb, args.cache_ttl_secs);
+    } else {
+        println!("  Cache:           Disabled");
+    }
 
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     axum::serve(listener, app)
